@@ -27,6 +27,47 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+# Инициализация метрик
+REQUEST_TIME = Summary(
+    'bot_request_processing_seconds',
+    'Time spent processing request',
+    ['handler']
+)
+
+REQUEST_COUNT = Counter(
+    'bot_requests_total',
+    'Total requests count',
+    ['handler', 'status']
+)
+
+FILE_SIZE = Histogram(
+    'bot_file_size_bytes',
+    'Size of processed files',
+    buckets=[1024, 10240, 102400, 1048576]  # 1KB, 10KB, 100KB, 1MB
+)
+
+ACTIVE_USERS = Gauge(
+    'bot_active_users',
+    'Currently active users'
+)
+USER_ACTIVITY = Counter(
+    'bot_user_activity_total',
+    'User activity by command',
+    ['user_id', 'command']
+)
+
+ERROR_TYPES = Counter(
+    'bot_error_types_total',
+    'Error types count',
+    ['error_type']
+)
+
+
+
+# Запуск сервера метрик на порту 8000
+start_http_server(8000)
+
+
 # Настройки
 TOKEN = "8029314491:AAFiFXIBkWPUaf8Up1zFkDpsRTNc5v9UiCg"
 logging.basicConfig(
@@ -34,6 +75,34 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+from functools import wraps
+
+
+def track_metrics(handler_name):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(update: Update, context: CallbackContext):
+            user = update.effective_user
+            USER_ACTIVITY.labels(user_id=user.id, command=handler_name).inc() # Увеличиваем счетчик активных пользователей
+
+            try:
+                result = await func(update, context)
+                status = "success"
+                return result
+            except Exception as e:
+                status = "error"
+                raise
+            finally:
+                # Фиксируем время выполнения
+                duration = time.time() - start_time
+                REQUEST_TIME.labels(handler=handler_name).observe(duration)
+                REQUEST_COUNT.labels(handler=handler_name, status=status).inc()
+                ACTIVE_USERS.dec()  # Уменьшаем счетчик
+
+        return wrapper
+
+    return decorator
 
 
 try:
@@ -553,6 +622,20 @@ def main():
 
     logger.info("Бот запущен")
     application.run_polling()
+@track_metrics("start_command")
+async def start(update: Update, context: CallbackContext) -> None:
+    user = update.effective_user
+    logger.info(f"Новый пользователь: ID={user.id}, Имя={user.first_name}, Username=@{user.username}")
+    await update.message.reply_text(...)
+
+
+@track_metrics("file_upload")
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    user = update.effective_user
+
+    # Фиксируем размер файла
+    FILE_SIZE.observe(doc.file_size)
 
 if __name__ == '__main__':
     main()
